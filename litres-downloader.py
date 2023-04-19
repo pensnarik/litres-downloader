@@ -4,12 +4,13 @@ import os
 import re
 import sys
 import time
+import string
 import img2pdf
 import logging
 import argparse
 
 from io import BytesIO
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from base64 import b64decode
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -86,6 +87,14 @@ class App():
             f.write(element.find_element(By.CSS_SELECTOR, 'img').screenshot_as_png)
 
 
+    def get_pages_count(self):
+        li = self.driver.find_element(By.CSS_SELECTOR, 'li[class="volume"]')
+        if li is None:
+            raise ValueError(f"Could not determine pages count")
+
+        return int(''.join(filter(lambda x: x in string.digits, li.text)))
+
+
     def download_page(self, page):
         logger.info(f"Downloading page {page}")
 
@@ -93,6 +102,10 @@ class App():
 
         actions = ActionChains(self.driver)
         actions.move_to_element(element).perform()
+
+        if os.path.isfile(self.get_page_filename(page)):
+            logger.info(f"Page {page} exists, skipping")
+            return True, 0
 
         b64img = self.driver.execute_script(f'''
             var img = document.querySelector("#p_{page} > img");
@@ -106,9 +119,15 @@ class App():
             return dataURL.replace(/^data:image\\/(png|jpg);base64,/, "");
         ''')
 
-        img = Image.open(BytesIO(b64decode(b64img)))
+        try:
+            img = Image.open(BytesIO(b64decode(b64img)))
+        except UnidentifiedImageError:
+            logger.error(f"Could not open image, b64img was: {b64img}")
+            return False, 5
+
         img.save(self.get_page_filename(page))
 
+        return True, 1
 
     def get_page_filename(self, page):
         return os.path.join('book', f'page_{page}.png')
@@ -146,13 +165,20 @@ class App():
         except NoSuchElementException:
             logger.info("Already logged in")
 
+        pages = self.get_pages_count()
+
+        logger.info(f"Total pages: {pages}")
+
         time.sleep(1)
         self.driver.find_element(By.CSS_SELECTOR, 'a[title="Читать онлайн"]').click()
         time.sleep(3)
 
-        for page in range(0, 5):
-            self.download_page(page)
-            time.sleep(0.5)
+
+        for page in range(0, pages):
+            success, time_to_sleep = self.download_page(page)
+            time.sleep(time_to_sleep)
+            if not success:
+                self.download_page(page)
 
         self.create_book()
 
